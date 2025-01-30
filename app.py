@@ -6,6 +6,13 @@ import requests
 from dotenv import load_dotenv
 import time
 from datetime import datetime
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('car_bot')
 
 # Load environment variables
 load_dotenv()
@@ -18,7 +25,7 @@ gemini_key = os.getenv('GOOGLE_API_KEY')
 genai.configure(api_key=gemini_key)
 
 # Initialize the model
-model = genai.GenerativeModel('gemini-pro')
+model = genai.GenerativeModel('gemini-1.5-pro-latest')
 
 # API configurations
 WEATHER_API_KEY = os.getenv('WEATHER_API_KEY')
@@ -124,6 +131,160 @@ def get_nasa_apod():
             return "Извините, не удалось получить данные от NASA API."
     except Exception as e:
         return f"Произошла ошибка при получении данных NASA: {str(e)}"
+    
+def get_car_info_with_gemini(car_name):
+    """Get detailed car information using Gemini AI"""
+    try:
+        # Create a structured prompt for Gemini
+        structured_prompt = f"""
+        Create a comprehensive and engaging description of {car_name} in Russian language.
+        Format the response as follows:
+
+        🏢 ИСТОРИЯ И ПРОИСХОЖДЕНИЕ
+        [Detailed history and origins of the make/model]
+
+        ⭐ КЛЮЧЕВЫЕ ОСОБЕННОСТИ
+        [Key features and characteristics that make this car/brand unique]
+
+        📈 ЭВОЛЮЦИЯ И ПОКОЛЕНИЯ
+        [Information about different generations or significant models]
+
+        🔧 ТЕХНИЧЕСКИЕ ХАРАКТЕРИСТИКИ
+        [Notable technical specifications and innovations]
+
+        🌟 ДОСТИЖЕНИЯ И НАГРАДЫ
+        [Major achievements, awards, and recognition]
+
+        🚀 ИНТЕРЕСНЫЕ ФАКТЫ
+        [3-4 fascinating facts about the car/brand]
+
+        Please make the response detailed but concise, using emoji for each section.
+        Focus on accuracy and interesting details that car enthusiasts would appreciate.
+        """
+
+        # Generate content using Gemini
+        response = model.generate_content(structured_prompt)
+        
+        # Format the response
+        formatted_response = response.text + "\n\n🔎 Информация предоставлена AI на основе общедоступных данных"
+        
+        return formatted_response
+
+    except Exception as e:
+        return f"Произошла ошибка при получении информации: {str(e)}"
+    
+@bot.message_handler(commands=['cars'])
+def cars_command(message):
+    """Handle the /cars command"""
+    try:
+        car_query = ' '.join(message.text.split()[1:])
+        
+        if not car_query:
+            usage_message = """
+            ⚠️ Пожалуйста, укажите марку или модель автомобиля.
+
+            Примеры использования:
+            /cars Toyota Camry
+            /cars BMW M5
+            /cars Mercedes-Benz
+            """
+            bot.reply_to(message, usage_message)
+            return
+
+        logger.info(f"Processing car query: {car_query}")
+        
+        # Send typing action
+        bot.send_chat_action(message.chat.id, 'typing')
+        
+        # Get car information using Gemini
+        car_info = get_car_info_with_gemini(car_query)
+        
+        # Search for images
+        logger.info(f"Searching images for: {car_query}")
+        images = search_car_images(car_query)
+        
+        # Send images first if available
+        if images:
+            media_group = []
+            for idx, image_url in enumerate(images):
+                try:
+                    caption = f"🚗 {car_query.upper()} - Фото {idx + 1}" if idx == 0 else ""
+                    media_group.append(telebot.types.InputMediaPhoto(image_url, caption=caption))
+                except Exception as e:
+                    logger.error(f"Error adding image to media group: {e}")
+                    continue
+            
+            if media_group:
+                try:
+                    logger.info("Sending media group")
+                    bot.send_media_group(message.chat.id, media_group)
+                except Exception as e:
+                    logger.error(f"Error sending media group: {e}")
+                    logger.info("Attempting to send images individually")
+                    for image in images:
+                        try:
+                            bot.send_photo(message.chat.id, image)
+                        except Exception as img_e:
+                            logger.error(f"Error sending individual image: {img_e}")
+                            continue
+        
+        # Send text information with markdown support
+        intro_message = f"""
+🚗 *{car_query.upper()}*
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        full_response = intro_message + car_info
+        
+        # Экранируем специальные символы markdown
+        full_response = full_response.replace('_', '\_').replace('*', '\*').replace('`', '\`').replace('[', '\[')
+        
+        try:
+            bot.reply_to(message, full_response, parse_mode='MarkdownV2')
+        except Exception as e:
+            logger.error(f"Error sending markdown message: {e}")
+            # Fallback: отправка без markdown если возникла ошибка
+            bot.reply_to(message, full_response)
+        
+        # Save to history
+        add_to_history(message.from_user.id, f"/cars {car_query}", car_info)
+        logger.info(f"Successfully processed car query for: {car_query}")
+
+    except IndexError:
+        logger.warning("No car model specified in command")
+        bot.reply_to(message, "Пожалуйста, укажите марку или модель автомобиля. Например: /cars Toyota Camry")
+    except Exception as e:
+        logger.error(f"Error processing car command: {e}")
+        error_message = f"😔 Извините, произошла ошибка при обработке запроса: {str(e)}"
+        bot.reply_to(message, error_message)
+
+def search_car_images(car_name, num_images=3):
+    """Search for car images using Google Custom Search API"""
+    try:
+        images = []
+        formattedname = ""
+        # Форматируем запрос, заменяя пробелы на +
+        for i in car_name:
+            if i == ' ' or i == '+':
+                formattedname += '+'
+            else:
+                formattedname += i
+                
+        search_query = f"{formattedname}+car+official"
+        coolquery = f"https://www.googleapis.com/customsearch/v1?key=AIzaSyDptyzxGJg-aR5IldozvISzjNgF2_TISJo&cx=e1cac863f07bf4f8b&q={search_query}&searchType=image"
+        
+        imageresponse = requests.get(coolquery).json()
+        
+        # Получаем несколько изображений
+        for i in range(min(num_images, len(imageresponse.get('items', [])))):
+            image_url = imageresponse.get('items')[i].get('link')
+            logger.warning(f"Found image URL: {image_url}")
+            images.append(image_url)
+            
+        return images
+    except Exception as e:
+        logger.error(f"Error in image search: {e}")
+        return []
+
 
 def set_menu_commands():
     """Set bot commands for menu"""
@@ -132,6 +293,7 @@ def set_menu_commands():
         telebot.types.BotCommand("help", "Показать справку"),
         telebot.types.BotCommand("weather", "Узнать погоду"),
         telebot.types.BotCommand("nasa", "Фото дня от NASA"),
+        telebot.types.BotCommand("cars", "История автомобиля 🚗"),
         telebot.types.BotCommand("clear", "Очистить историю")
     ]
     bot.set_my_commands(commands)
@@ -147,6 +309,7 @@ def send_welcome(message):
     /help - показать список команд
     /weather <город> - узнать погоду в городе
     /nasa - получить астрономическое фото дня
+    /cars <марка/модель> - получить подробную историю автомобиля 🚗
     /clear - очистить историю разговора
     
     Также вы можете задать мне любой вопрос, и я постараюсь помочь!
@@ -168,8 +331,8 @@ def send_help(message):
     Примеры:
     /weather Алматы
     /weather Moscow
+    /cars BMW M5
     
-    Для общения с AI просто напишите свой вопрос!
     """
     bot.reply_to(message, help_text)
 
